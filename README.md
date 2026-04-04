@@ -68,7 +68,7 @@
 ```
 
 ## Funcionalidades 
-* verifica logs do sisteam e avisar sobre possiveis tentativas de acesso  
+* verifica logs do sistema e avisar sobre possiveis tentativas de acesso  
 * verifica logs do servidor e notifica possiveis ataques
 * verifica servicos e avisar possiveis acesso a eles 
 
