@@ -31,25 +31,243 @@ args=("$@")
 
 token_discord_bot=''
 recipient_id=''
+communication_01_ID=''
 
 banner_scritp() {
  source banner.sh 
 }
 
+#--------------------- funcao barra de Tarefas ----------------------------------
+
+barra_tarefas(){
+  local msg=$3 # mensagem personalizada
+  local inicio=$1 # 10
+  local final_l=$2 # 40 
+  local total_barra=40 # total de barra [  ]
+
+  local porcentagem=$(($inicio * 100 / $final_l))  # 10 * 100 = 1000 / 40 = 25
+
+  preenchimento=$(($inicio * $total_barra / $final_l)) # 10 * 50 = 500 / 40 = 12 | 12 caracteres # 
+  vazio=$(($total_barra - $preenchimento)) # 50 - 12 = 38  | 38 espacos vazios 
+
+  barra=$(printf "%${preenchimento}s" | tr ' ' '#' ) # criamos 12 espacos e transformamos eles em # ou seja 12 #
+  espacos=$(printf "%${vazio}s" | tr ' ' '-') # criamos 38 espacos vazios e depois substituimos por - ou seja 38 -
+
+  echo -ne "$3  [${barra}${espacos}] ${porcentagem}%\r" # [############---------------------------------]
+}
+
+
 # --------------------- Funcao que ativa o modo de monitoramento no SO ------------------------------
 
 active_monitoring_sistem_operation (){
-  sudo -v 
+
   echo -e "${RED}[-] - Aplicando Script auxiliar em /usr/bin/__script_analise_so.sh${NC}"
 
   #aplicando script  esse script deve aparecer la em /usr/bin/nome do nosso script e ao executalo ele deve aparecer a msg "test deu certo !"
-  cat << EOF | sudo tee /usr/bin/__script_analise_so.sh > /dev/null
+  
+   cat << EOF > /usr/bin/__script_analise_so.sh
+    #!/bin/bash
+    TOKEN="$token_discord_bot"
+    CHANNEL_ID="$communication_01_ID"
+EOF
+  
+  
+  cat << 'EOF' >> /usr/bin/__script_analise_so.sh
 
   #!/bin/bash
 
-    echo -e "teste que deu certo!\n"
+  #====================================================
+  # ARQUIVOS DE CONTROLE
+  #====================================================
+  USER=$(whoami)    # usuario atual 
+
+  if [ ! -d  "$HOME/logs_script_alert_server" ]; then mkdir $HOME/logs_script_alert_server ; fi
+
+  LAST_RUN_FILE="$HOME/logs_script_alert_server/_ssh_monitor_last_run" # mude pra /tmp porem pode perder ref
+  SCRIPT_LOG="$HOME/logs_script_alert_server/_ssh_monitor.log"
+  LIMITE_TENTATIVAS=5
+
+  #=====================================================
+  # FUNCAO DE LOG
+  #=====================================================
+
+  log () {
+    
+    if [[ -z "$1" || "$1" == "." ]]; then 
+        echo -e "\n" >> "$SCRIPT_LOG"
+    else
+        echo -e "[$(date '+%Y-%m-%d %H:%M:%S')] $1" | tee -a  "$SCRIPT_LOG"
+    fi
+
+  }
+
+  #====================================================
+  # FUNCAO MSG PRA O BOT DISCORD
+  #====================================================
+  
+  messager_bot () {
+
+      local TEXTO_PARA_JSON=$(echo "$1" | sed ':a;N;$!ba;s/\n/\\n/g')
+
+      curl -X POST "https://discord.com/api/v10/channels/${CHANNEL_ID}/messages" \
+        -H "Authorization: Bot ${TOKEN}" \
+        -H "Content-Type: application/json" \
+        -d "{\"content\": \"$TEXTO_PARA_JSON\"}" 2>/dev/null | grep -q "channel_id";
+
+      local DATE2=$(date '+%Y-%m-%d  %H:%M:%S')
+
+      log " - Messagem Enviada ao Bot as [ $DATE2 ]"
+
+  }
+
+
+  #======================================================
+  # LER O TIMESTEMP DA ULTIMA EXECUSAO (LAST_RUN_FILE)
+  #======================================================
+    
+  if [ -f "${LAST_RUN_FILE}" ]; then 
+        
+      FROM_TIMESTEMP=$(cat $LAST_RUN_FILE)
+      log " - lendo a linha que ja tem Log [timestemp] - $FROM_TIMESTEMP : " # vai pra o arquivo de log
+
+  else 
+
+      FROM_TIMESTEMP=$(date -d "1 hour ago " "+%Y-%m-%d %H:%M:%S") #  se esse arquivo nao existir criar ele e add o timestemp de 1 hora atras 
+      log " - primeira execusao - usando timestemp inicial : $FROM_TIMESTEMP "
+
+      echo "$FROM_TIMESTEMP" > "$LAST_RUN_FILE"
+
+  fi
+
+
+  # atualiza o timestemp - pega o timestemp atual da hora da execusao 
+  # grava no arquivo de log
+  TO_TIMESTEMP=$(date "+%Y-%m-%d %H:%M:%S" )
+  log " - analisando logs do periodo [ ${FROM_TIMESTEMP} ] ate  [ ${TO_TIMESTEMP} ]"
+
+
+  #========================================================
+  # BUSCA LOGS APENAS NO INTERVALO DEFINIDO 
+  #========================================================
+
+
+  LINHAS_LOGS_SSH=$(journalctl -u sshd --since "$FROM_TIMESTEMP" --no-page 2>/dev/null ) # --until 
+
+  QTD_LINHAS=$(echo "$LINHAS_LOGS_SSH" | wc -l)
+
+
+  if [[ "$QTD_LINHAS" -lt 2  ]]; then 
+
+      log " - nenhum log encontrado no periodo de [ $FROM_TIMESTEMP ] - [ $TO_TIMESTEMP ]"
+
+      echo "$TO_TIMESTEMP" > "$LAST_RUN_FILE" # ATUALIZA O TIMESTEMP PRA AGORA ( HORA DESSA EXECUSAO )
+
+      log " - Timestemp atualizado para [ $TO_TIMESTEMP ]"
+
+  else
+
+      #===========================================================
+      # ANALISANDO LINHAS E VERIFICANDO COMEXOES BEM-SUCEDIDAS
+      #===========================================================
+
+      log " - logs encontrados [ $QTD_LINHAS ] - linhas de log"
+
+      CONEXOES=$(echo "$LINHAS_LOGS_SSH" | grep "Accepted ")
+
+
+      if [[ -n "$CONEXOES" ]]; then 
+
+        log " - Conexoes Bem-Sucedida no servico de SSH \u2714 "
+
+        # abre apenas um processo
+
+          while read -r linha; do
+
+            # Usamos o 'read' para capturar a saída do awk em variáveis locais
+            read -r DATE USUARIO IP PORT METODO <<< $(echo "$linha" | sed 's@::1@127.0.0.1@g' | awk '{print $3, $9, $11, $13, $7}')
+
+            # Agora  montaMOS a mensagem usando as variáveis que acabou de preencher
+
+            MENSAGEM=$(printf "\n[+] - CONEXOES SSH BEM-SUCEDIDA \U2705 \n[+] - Usuário: %s\n[+] - IP: %s\n[+] - Método: %s\n[+] - Porta: %s\n[+] - Horário: %s\n==============================" "$USUARIO" "$IP" "$METODO" "$PORT" "$DATE")
+            
+            log " - enviando msg para o bot "
+
+            # funcao que envia dados pra o discord!
+            messager_bot "$MENSAGEM"
+
+            log "$MENSAGEM"
+
+          done <<< "$CONEXOES"
+      else
+
+          log " - nenhuma conexao bem sucedida durante o periodo de $FROM_TIMESTEMP  a $TO_TIMESTEMP "
+
+      fi
+
+
+      #=============================================================
+      # VERIFICAR TENTATIVAS DE FORCA BRUTA 
+      #=============================================================
+
+      log " - iniciando Teste de Tentativa de forca bruta"
+
+      FALHAS=$( echo "$LINHAS_LOGS_SSH" | grep "Failed password")
+
+      if [ -n "$FALHAS" ]; then 
+        
+        TENTATIVAS_FALHAS=$( echo "$FALHAS" | wc -l ) # linhas de erro em num ( 5 linhas com erro )
+
+          log " - Foram encontrados $TENTATIVAS_FALHAS Failed password "
+
+            echo "$FALHAS" | grep "Failed password" | grep -oP 'from \K[0-9.]+' | sort | uniq -c | while read tentativas ip;
+              do
+
+                if [ $tentativas -gt $LIMITE_TENTATIVAS ]; 
+                  then 
+                      # coleta IP e  User que fez as tentativas 
+                      USUARIO_ALVO=$( echo $FALHAS | grep  "$ip" | grep -oP 'for \K[^ ]+' | sort | uniq -u | tr '\n' ', ' | sed 's/, $//');
+                      
+                      #ALERT=$(echo "\U0001F6A8")
+
+                      #ALERT_MENSAGEM="[+] - \U0001F6A8 \u26A0 ALERTA DE BRUTE FORCE SSH \U0001F6A8 \u26A0\\n[+] - Dados de User: $USUARIO_ALVO\\n[+] - IP: $ip\\n[+] - TENTATIVAS: $tentativas falhas " 
+
+                      ALERT_MENSAGEM=$(printf "[+] - ALERTA DE BRUTE FORCE SSH \U0001F6A8 \u26A0\n[+] - Dados de User: %s\n[+] - IP: %s\n[+] - TENTATIVAS: %s falhas\n==============================" "$USUARIO_ALVO" "$ip" "$tentativas")
+
+                      log " - Enviando Msg de Alerta pra o bot "
+
+                      # chamar funcao de enviar msg pra o bot do Discord
+                      messager_bot "$ALERT_MENSAGEM"
+
+                      log " - $ALERT_MENSAGEM"
+
+                else
+                    log " - foi identificado erros de senha porem erros Comuns !"
+                fi
+
+              done
+      else
+
+          log " - Nao foi encontrado Nenhum erro de Password durante o periodo de -  [ $FROM_TIMESTEMP ] - [ $TO_TIMESTEMP ]" 
+
+      fi
+
+  fi
+
+  #================================================================
+  # ATUALIZAR TIMESTEMP
+  #================================================================
+  
+  DATE_NEXT_EXECUTION=$(date -d "1 hour" "+%H:%M:%S")
+
+  log " - Iniciando atualização..."
+  echo "$TO_TIMESTEMP" > "$LAST_RUN_FILE"
+  log " - timestemp atualizado para [$TO_TIMESTEMP]"
+  log " - Proxima execusao as [$DATE_NEXT_EXECUTION]"
+  log "=============================================="
+  log "."
 
 EOF
+
 
   sleep 1
   echo -e "${RED}[-] - Adicionando permissoes (write/read/execution) pra seu user apenas U+X${NC}"
@@ -62,9 +280,98 @@ EOF
   sleep 2
   echo -e "${RED}[+] - Exec  :${NC}${GREEN} \u2714 ${NC}\n"
 
-  echo -e "${RED}[-] - ${NC}${GREEN}Configurando Agendamento com crontab...${NC}"
+
+  #=====================================================
+  # DEFININDO ATIVIDADE DE CRONJOB
+  #=====================================================
+  # - VERIFICAR 
+  # - SE NAO TIVER INSTAR
+  # - DEFININIR O TEMPO PARA A EXECUSAO DO SCRIPT 
+  # - PERSONALIZAR PRA DEFINIR O TEMPO EXATO PRA TEMPO QUE AS TAREFA SERA EXECUTADA!
+
+
+  echo -e "${RED}[-]========== Configurando Agendamento com crontab ==========${NC}"
 
   # sudo /usr/bin/__script_analise_so.sh
+
+  local total=20
+
+  for i in $(seq 1 $total); do 
+    barra_tarefas "$i" "$total" "${RED}[+]${NC} ${GREEN}verificando se voce possui o cronie... ${NC}"
+    sleep 0.5
+  done
+  echo ""
+
+  if pacman -Q cronie | grep -q cronie ; then 
+
+    echo -e "${RED}[+]${NC}${GREEN} - cronie foi encontrado ✅ ${NC}"
+    sleep 1
+
+  else 
+
+    echo -ne "${RED}[+]${NC}${GREEN} - cronie nao foi encontrado Deseja Instalar cronie ?(s/n) :   ${NC}"
+    read resposta_cron 
+
+    if [[ "$resposta_cron" =~ ^[sS] ]]; then
+      
+      sleep 1
+      if sudo pacmna -S cronie --noconfirm > /dev/null 2>&1 ; then 
+
+        for i in $(seq 1 $total); do 
+          barra_tarefas $i $total "${GREEN}[+] - Instalando o cronie... ${NC}"
+        done
+        echo ""
+
+        echo -e "${GREEN}[+] - Cronie instalado com sucesso ✅ !${NC}\n"
+
+      else 
+        echo -e "${RED}[+] - error ao instalar pacote , tente novamente${NC}"
+        exit 0
+      fi
+
+    else 
+        echo -e "${GREEN}[-] - Encerrando o Script ...${NC}"
+        exit 0
+    fi
+
+  fi
+
+  #==============================================
+  # Adicionado config no crontab
+  #==============================================
+
+
+temp_cron=$(mktemp)
+
+sudo crontab -l 2>/dev/null > "$temp_cron"
+
+
+if ! grep -q "#adicionado script de automocao..." "$temp_cron" ; then 
+
+    echo "#adicionado script de automocao..." >> "$temp_cron"
+    echo "0 * * * *  /usr/bin/__script_analise_so.sh" >> "$temp_cron"
+
+    sudo crontab "$temp_cron" 1>/dev/null 2>&1
+
+else 
+    echo -e "${YELLOW}[+] - Linhas ja adicionadas nada Mudado !${NC}\n"
+fi 
+
+rm $temp_cron
+
+  echo -e "${GREEN}[+] - Script adicionado ao crontab com sucesso ✅  ${NC}"
+  echo -e "${GREEN}[+] - scritp pronto pra uso ✅  ${NC}\n"
+
+
+
+  if systemctl is-active --quiet cronie ; then 
+    echo -e "${RED}[+] ${NC}${GREEN} - cronie em execusao✅  ${NC}\n"
+  else
+    echo -e "${RED}[+]${NC}${GREEN} - iniciando servico do Cronie ${NC}\n"
+
+    systemctl start cronie 
+
+  fi
 
 
 }
@@ -200,7 +507,6 @@ validation_args_for_features (){
 
 if [[ "${#args[@]}" -gt 0 && ! "${args[0]}" =~ ^[0-9]+$ && "${args[0]}" =~ ^-- ]];
   then 
-    sudo -v
     banner_scritp
     verify_token_bot_id_Dm # verifica se passou token e Id_dm ! # ARRUMAR TA NA POSICAO ERRADA 
     clear
@@ -210,6 +516,7 @@ else
     echo -e "${RED}[-] - Modo de Uso do Script : $0 --active-alert-so ${NC}"
     echo -e "${RED}[-] - Modo de Uso do Script : $0 --Arg1 --arg2 ${NC}"
     echo -e "${RED}[-] - Modo de Uso do Script : $0 --Arg1 --arg2 ${NC}\n"
+    echo -e "${RED}[-] - Execute o Script com Privilegios Root para evitar erros no Script !${NC}\n"
     exit 1
 fi
 
@@ -223,11 +530,9 @@ verify_communication_bot
 validation_args_for_features "${args[@]}"
 
 
-so=$(cat /etc/os-release  | grep -v ".*_ID=" | grep "ID=" | cut -d '=' -f 2) 
+#so=$(cat /etc/os-release  | grep -v ".*_ID=" | grep "ID=" | cut -d '=' -f 2) 
 
-case $so in
-    "arch")   echo "is_arch" ;; # chama funcao que executa pra arch 
-    "debian") echo "is_debian" ;; # chama funcao que executa para debian 
-esac
-
-# funcao de verificacao de args
+#case $so in
+#   "arch")   echo "is_arch" ;; # chama funcao que executa pra arch 
+#  "debian") echo "is_debian" ;; # chama funcao que executa para debian 
+#esac
